@@ -1,0 +1,16 @@
+{
+  "name": "ppro-agent-bridge",
+  "version": "0.1.0",
+  "description": "Resident UXP panel + CLI so a terminal agent can drive Premiere Pro",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "check": "node --check plugin/index.js && python3 scripts/check_api_names.py && python3 -m unittest discover -s tests"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "private": true
+}
