@@ -1,7 +1,7 @@
 {
   "id": "com.sagelight.ppro-agent-bridge",
   "name": "Agent Bridge",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "main": "index.html",
   "manifestVersion": 5,
   "host": [

@@ -1,6 +1,6 @@
 {
   "name": "ppro-agent-bridge",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "Resident UXP panel + CLI so a terminal agent can drive Premiere Pro",
   "directories": {
     "test": "tests"

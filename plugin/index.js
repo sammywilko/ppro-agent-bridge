@@ -17,7 +17,7 @@ const uxp = require("uxp");
 const fs = require("fs");
 const os = require("os");
 
-const VERSION = "0.1.3";
+const VERSION = "0.1.4";
 const POLL_MS = 400;
 const COMMAND_TIMEOUT_MS = 90000;
 const HEARTBEAT_MS = 2000;
@@ -184,10 +184,18 @@ async function readMarkers(seq, ticksPerFrame) {
 }
 function runTransaction(project, label, buildActions) {
   // buildActions(compoundAction) adds Actions; returns boolean success from Premiere.
+  // Mutations must run inside project.lockedAccess() — without it, createBinAction inside
+  // executeTransaction fails with "The script object is no longer valid" (measured 2026-08-29,
+  // Beta 27.0; Adobe's samples wrap every transaction this way). Falls back to a bare
+  // transaction only if the API has no lockedAccess.
   let error = null;
-  const ok = project.executeTransaction((ca) => {
-    try { buildActions(ca); } catch (e) { error = e; }
-  }, label);
+  let ok;
+  const run = () => {
+    ok = project.executeTransaction((ca) => {
+      try { buildActions(ca); } catch (e) { error = e; }
+    }, label);
+  };
+  if (typeof project.lockedAccess === "function") project.lockedAccess(run); else run();
   if (error) throw error;
   return ok;
 }

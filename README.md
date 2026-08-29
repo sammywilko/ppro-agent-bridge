@@ -105,6 +105,11 @@ python3 -m unittest discover -s tests -v    # 11 protocol tests against the fake
 - A "File Import Failure" dialog blocks the panel until dismissed; commands now race a 90 s deadline
   (`COMMAND_TIMEOUT_MS`). `importFiles` must not be passed `undefined` in the optional slots
   ("Illegal Parameter type").
+- **Every mutating transaction must run inside `project.lockedAccess()`.** Without it,
+  `root.createBinAction()` inside `executeTransaction` fails with "The script object is no longer
+  valid" and no bin is made (measured 2026-08-29 on 27.0.0; Adobe's samples wrap transactions this
+  way). `runTransaction` does it since v0.1.4; on an older panel, `eval` a script that calls
+  `project.lockedAccess(() => project.executeTransaction(…))` itself.
 - `Project.getSequence(guid)` returned a non-Sequence (Promise?) despite the typings — look sequences up
   via `getSequences()` instead.
 - `VideoTrack.getTrackItems` is typed synchronous; the panel `await`s it either way.
