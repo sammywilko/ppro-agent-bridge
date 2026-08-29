@@ -53,7 +53,7 @@ for enum, member in set(re.findall(r"\bppro\.Constants\.(\w+)\.(\w+)", js)):
 api_like = set(re.findall(r"\.((?:get|is|create|import|set|execute|open|save|add|remove|find|cast|close|clear)\w*)\s*\(", js))
 known_js = {  # DOM / JS built-ins, or covered by the root-member check above
     "getElementById", "getItem", "setItem", "getTime", "addEventListener", "getMarkers",
-    "createElement", "removeChild", "find", "isArray", "isFinite", "isInteger", "setInterval", "setTimeout",
+    "createElement", "removeChild", "find", "isArray", "isFinite", "isInteger", "setInterval", "setTimeout", "get",
 }
 for m in sorted(api_like):
     if m in known_js:

@@ -196,9 +196,10 @@ def _compare_track(tag: str, plan_items: list, live_items: list, allow_relink: b
     notes: list[str] = []
     fails = 0
     live_items = sorted(live_items, key=lambda i: (_frames(i.get("startFrame")) is None, _frames(i.get("startFrame")) or 0))
+    sev = "FAIL" if strict_frames else "warn"
     if len(plan_items) != len(live_items):
         fails += 1
-        notes.append(f"FAIL {tag}: {len(plan_items)} clips in xml, {len(live_items)} in Premiere")
+        notes.append(f"{sev} {tag}: {len(plan_items)} clips in xml, {len(live_items)} in Premiere")
     mism = offline = missing = unknown = relinked = 0
     for pi, li in zip(plan_items, live_items):
         label = f"{tag} {str(pi['name'])[:40]!r}"
@@ -234,7 +235,7 @@ def _compare_track(tag: str, plan_items: list, live_items: list, allow_relink: b
     if strict_frames:
         fails += mism
     fails += offline + missing + unknown + (0 if allow_relink else relinked)
-    verdict = "ok  " if not fails and not (len(plan_items) != len(live_items)) else "FAIL"
+    verdict = "ok  " if not fails and not (len(plan_items) != len(live_items)) else sev
     notes.append(f"{verdict} {tag}: {len(live_items)} clips, {mism} frame mismatches, {offline} offline, {missing} missing, {unknown} unknown, {relinked} relinked")
     return fails, notes
 
@@ -252,11 +253,15 @@ def verify_xml(xml_path: Path, seq_name: str | None, timeout: float, seq_guid: s
     if fps is None or round(fps, 3) != plan["timebase"]:
         fails += 1
         notes.append(f"FAIL fps: xml timebase {plan['timebase']} vs live {fps}")
-    if live["timing"]["endFrames"] != plan["duration"]:
+    # Judge duration by the VIDEO end: audio (e.g. alternate mixes) may legitimately run past the picture,
+    # and Premiere reports the sequence end as the last item on any track.
+    video_end = max((_frames(i.get("endFrame")) or 0 for t in live.get("video", []) for i in t["items"]), default=None)
+    if video_end != plan["duration"]:
         fails += 1
-        notes.append(f"FAIL duration: xml {plan['duration']} frames vs live {live['timing']['endFrames']}")
+        notes.append(f"FAIL duration: xml {plan['duration']} frames vs live video end {video_end} (sequence end {live['timing']['endFrames']})")
     else:
-        notes.append(f"ok   duration {plan['duration']} frames @ {plan['timebase']}fps")
+        extra = "" if live["timing"]["endFrames"] == plan["duration"] else f"  (sequence end {live['timing']['endFrames']}: audio runs past picture)"
+        notes.append(f"ok   duration {plan['duration']} frames @ {plan['timebase']}fps{extra}")
     if live.get("markersError"):
         notes.append(f"warn markers unreadable: {live['markersError']}")
 
@@ -334,6 +339,18 @@ def human(op: str, r) -> str:
     return json.dumps(r, indent=2)
 
 
+def relink_items_from_xmeml(xml_path: Path) -> list[dict]:
+    """[{name, path}] for every clipitem in the xmeml — the relink map Premiere needs after an OTIO import."""
+    plan = parse_xmeml(xml_path)
+    seen: dict[str, str] = {}
+    for kind in ("video", "audio"):
+        for t in plan[kind]:
+            for it in t["items"]:
+                if it["path"] and it["name"] not in seen:
+                    seen[it["name"]] = it["path"]
+    return [{"name": n, "path": p} for n, p in seen.items()]
+
+
 def _seq_args(ns) -> dict:
     return {k: v for k, v in {"name": getattr(ns, "name", None), "guid": getattr(ns, "guid", None)}.items() if v}
 
@@ -359,6 +376,7 @@ def main(argv=None) -> int:
     m = sub.add_parser("add-markers"); seq_opts(m); m.add_argument("--markers-json", required=True)
     e = sub.add_parser("eval"); e.add_argument("code", nargs="?"); e.add_argument("--file"); e.add_argument("--args-json")
     v = sub.add_parser("verify-xml"); v.add_argument("xml"); seq_opts(v); v.add_argument("--allow-relink", action="store_true")
+    rl = sub.add_parser("relink"); rl.add_argument("--from-xml"); rl.add_argument("--map-json"); rl.add_argument("--force", action="store_true")
     ns = ap.parse_args(argv)
 
     try:
@@ -374,6 +392,20 @@ def main(argv=None) -> int:
             return 0 if ok else 3
         if ns.cmd in ("set-active", "add-markers") and not _seq_args(ns):
             raise BridgeError(f"{ns.cmd}: --name or --guid required")
+        if ns.cmd == "relink":
+            if ns.from_xml:
+                items = relink_items_from_xmeml(Path(ns.from_xml).resolve())
+            elif ns.map_json:
+                items = json.loads(Path(ns.map_json).read_text())
+            else:
+                raise BridgeError("relink: --from-xml CUT.xml or --map-json FILE required")
+            missing = [i["path"] for i in items if not Path(i["path"]).exists()]
+            if missing:
+                raise BridgeError(f"relink: {len(missing)} target files do not exist on disk, e.g. {missing[0]}")
+            r = call("relinkMedia", {"items": items, "force": ns.force}, ns.timeout)
+            print(json.dumps(r, indent=2) if ns.json else f"relink: {r['matched']} matched, {r['changed']} changed, {r['alreadyOnline']} already online, {len(r['failed'])} failed, {len(r['unmatchedNames'])} names not in project"
+                  + "".join(f"\n  FAILED {f['name'][:50]}: {f['error']}" for f in r["failed"][:10]))
+            return 0 if not r["failed"] else 1
         op, args = {
             "ping": ("ping", {}), "project": ("project", {}), "bins": ("bins", {}), "sweep-offline": ("sweepOffline", {}),
             "dump-sequence": ("dumpSequence", {**_seq_args(ns), "videoOnly": getattr(ns, "video_only", False)}),

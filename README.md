@@ -87,10 +87,36 @@ python3 scripts/check_api_names.py          # CLEAN = every name exists in Adobe
 python3 -m unittest discover -s tests -v    # 11 protocol tests against the fake panel
 ```
 
-## Open questions (resolve on first live load)
+## Measured on Premiere Pro (Beta) 27.0.0 — 2026-08-29, first live day
 
-- Does `Project.importFiles([...xml])` invoke Premiere's XML importer the way File ▸ Import does?
-  The typings have no dedicated import-XML call. If not, import the XML by hand once and use
-  `verify-xml` — everything else still works.
+- **`Project.importFiles([...xml])` does NOT import FCP7 XML** — it runs the media importer, which
+  fails with "File Import Failure". `Project.open(xml)` also refuses ("Failed to convert project file").
+- **OTIO does import through `importFiles`**, but only in a minimal hand-built shape:
+  `Timeline → Stack → Track → Clip(ExternalReference)` with **plain absolute paths** in `target_url`.
+  The otio-fcp-adapter's output (`file:///` URLs, metadata blobs) is rejected as "unsupported
+  compression type". `scripts/xmeml_to_otio.py` builds the accepted shape from an xmeml; Premiere names
+  the sequence after the top **stack**, so the stack is named too. Overlapping clipitems on one xmeml
+  track are spilled onto extra tracks (A2 → A2/A3). Per-clip audio levels do not survive OTIO.
+- **Anything under `~/Documents` fails in this beta via the API** — imports say "unsupported
+  compression type", `changeMediaFilePath` returns false, background auto-save fails — while the
+  byte-identical file anywhere else (`~/Movies`, `/private/tmp`, 220-char paths) imports online.
+  TCC shows Documents *granted*; mechanism unknown; rule stands after six paired tests.
+  **Keep the Premiere project, delivery media and OTIO/XML outside `~/Documents`.**
+- A "File Import Failure" dialog blocks the panel until dismissed; commands now race a 90 s deadline
+  (`COMMAND_TIMEOUT_MS`). `importFiles` must not be passed `undefined` in the optional slots
+  ("Illegal Parameter type").
+- `Project.getSequence(guid)` returned a non-Sequence (Promise?) despite the typings — look sequences up
+  via `getSequences()` instead.
 - `VideoTrack.getTrackItems` is typed synchronous; the panel `await`s it either way.
-- Marker `getMarkers()` on a sequence with none may throw rather than return `[]` — handled.
+- `ppro.Application.version` is undefined at runtime; ping omits it.
+
+### Working recipe (proven end-to-end, 91/91 clips online, verify-xml PASS)
+
+```
+# media + spine live outside ~/Documents, e.g. ~/Movies/<FILM>-EDIT/{MEDIA-vN,AUDIO}
+.venv/bin/python scripts/xmeml_to_otio.py ~/Movies/<FILM>-EDIT/CUT.xml      # xml paths already rewritten
+ppro-bridge eval 'await ppro.Project.createProject("/Users/…/Movies/<FILM>-EDIT/<FILM>-EDIT.prproj")'
+ppro-bridge import ~/Movies/<FILM>-EDIT/CUT.otio                            # prints the new sequence guid
+ppro-bridge verify-xml ~/Movies/<FILM>-EDIT/CUT.xml --guid <guid>           # PASS / FAIL, exit 3 on FAIL
+ppro-bridge eval '…setMute(true) on alternate tracks…'                      # xmeml "enabled=FALSE" does not carry
+```

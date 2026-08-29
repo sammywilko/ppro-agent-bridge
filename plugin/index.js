@@ -17,8 +17,9 @@ const uxp = require("uxp");
 const fs = require("fs");
 const os = require("os");
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.3";
 const POLL_MS = 400;
+const COMMAND_TIMEOUT_MS = 90000;
 const HEARTBEAT_MS = 2000;
 const TICKS_PER_SECOND = 254016000000; // Premiere's tick rate
 
@@ -294,7 +295,11 @@ const handlers = {
       targetBin = bin;
     }
     const suppressUI = args.suppressUI !== false;
-    const ok = await p.importFiles(paths, suppressUI, targetBin, !!args.asNumberedStills);
+    // Premiere rejects an explicit `undefined` in the optional slots with "Illegal Parameter type" (measured
+    // 2026-08-29 on 27.0 beta) — only pass the arguments we actually have.
+    const ok = targetBin
+      ? await p.importFiles(paths, suppressUI, targetBin, !!args.asNumberedStills)
+      : await p.importFiles(paths, suppressUI);
     // Import completion may be event-driven (Constants.OperationCompleteEvent.IMPORT_MEDIA_COMPLETE); when an
     // xml/otio is imported, give the sequence a few seconds to appear before diffing.
     const expectsSequence = paths.some((x) => /\.(xml|otio)$/i.test(x));
@@ -306,6 +311,41 @@ const handlers = {
       await new Promise((r) => setTimeout(r, 400));
     }
     return { ok, imported: paths, targetBin: args.bin || null, newSequences, expectedSequence: expectsSequence };
+  },
+
+  async relinkMedia(args = {}) {
+    // args.items: [{name, path}] — for every clip project item whose name matches, point it at `path`
+    // (ClipProjectItem.changeMediaFilePath — not undoable). Needed because Premiere's OTIO importer creates
+    // the clips but (measured 27.0 beta, 2026-08-29) leaves them offline with no media path.
+    const list = Array.isArray(args.items) ? args.items : [];
+    if (!list.length) throw new Error("relinkMedia: args.items [{name, path}] required");
+    const wanted = new Map(list.map((i) => [String(i.name), String(i.path)]));
+    const p = await activeProject();
+    const root = await p.getRootItem();
+    const results = { matched: 0, changed: 0, alreadyOnline: 0, failed: [], unmatchedNames: [] };
+    const seen = new Set();
+    async function walk(folder) {
+      for (const it of await folder.getItems()) {
+        if (it.type === ppro.ProjectItem.TYPE_BIN) { await walk(ppro.FolderItem.cast(it)); continue; }
+        const target = wanted.get(it.name);
+        if (!target) continue;
+        seen.add(it.name);
+        results.matched += 1;
+        let clip = null;
+        try { clip = ppro.ClipProjectItem.cast(it); } catch (e) { clip = null; }
+        if (!clip) { results.failed.push({ name: it.name, error: "not a clip item" }); continue; }
+        try {
+          if (!args.force && (await clip.isOffline()) === false) { results.alreadyOnline += 1; continue; }
+          const ok = await clip.changeMediaFilePath(target, !!args.overrideCompatibilityCheck);
+          if (ok) results.changed += 1; else results.failed.push({ name: it.name, error: "changeMediaFilePath returned false", path: target });
+        } catch (e) {
+          results.failed.push({ name: it.name, error: String(e && e.message ? e.message : e), path: target });
+        }
+      }
+    }
+    await walk(root);
+    results.unmatchedNames = [...wanted.keys()].filter((n) => !seen.has(n));
+    return results;
   },
 
   async setActiveSequence(args = {}) {
@@ -411,7 +451,15 @@ async function processOne(fileName) {
   try {
     const h = handlers[op];
     if (!h) throw new Error(`unknown op "${op}" (have: ${Object.keys(handlers).join(", ")})`);
-    const result = await h(cmd.args || {});
+    // A Premiere API call can hang behind a modal dialog (measured: importFiles + "File Import Failure"),
+    // which would wedge the poll loop forever. Race every command against a deadline; a late resolution
+    // is logged and discarded, never written as a second result.
+    const deadlineMs = Number(cmd.timeoutMs) > 0 ? Number(cmd.timeoutMs) : COMMAND_TIMEOUT_MS;
+    let timer;
+    const result = await Promise.race([
+      h(cmd.args || {}).then((r) => { clearTimeout(timer); return r; }, (e) => { clearTimeout(timer); throw e; }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`command timed out after ${deadlineMs} ms — is a Premiere dialog open?`)), deadlineMs); }),
+    ]);
     payload = { id, op, ok: true, result, ms: Date.now() - t0, ts: new Date().toISOString() };
     log(`✓ ${op} (${payload.ms} ms)`);
   } catch (e) {
